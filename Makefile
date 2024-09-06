@@ -58,6 +58,10 @@ static: $(LIB_A)
 
 shared dynamic: $(LIB_SO)
 
+test: static matrix_test
+	@./matrix_test
+	@$(RM) ./matrix_test
+
 # Build static library
 $(LIB_A): $(LIB_OBJS)
 	@echo "Building static library $(LIB_A)..."
@@ -71,6 +75,10 @@ $(LIB_SO): $(LIB_LOBJS)
 	@$(CC) $(CFLAGS) $(LIB_OPTS) -o $(LIB_SO) $(LIB_LOBJS)
 	@ln -s $(LIB_SO) $(LIB_SO_BASE)
 	@ln -s $(LIB_SO) $(LIB_SO_MAJOR)
+
+matrix_test: ./test/munit/munit.c ./test/matrix_test.c
+	@echo "Compiling $@..."
+	@$(CC) $(CFLAGS) -o $@ ./test/munit/munit.c ./test/matrix_test.c $(LIB_A)
 
 clean:
 	@echo "Cleaning build objects & library..."

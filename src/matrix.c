@@ -651,7 +651,8 @@ double matrix_tr( const matrix_t *a )
  */
 int matrix_cmp( const matrix_t *a, const matrix_t *b, const double tol )
 {
-	return (IS_EXIST( a ) && IS_EXIST( b ) && ARE_SAME_SIZE( a, b )) ?
+	return (a == b) ?
+		0 : (IS_EXIST( a ) && IS_EXIST( b ) && ARE_SAME_SIZE( a, b )) ?
 		_matrix_cmp( a, b, tol ) : -1;
 }
 
@@ -1045,6 +1046,7 @@ static matrix_t *_matrix_wls( const matrix_t *a, const matrix_t *b, const matrix
 		/* Then get the inverse of (A^T * A + Opt) */
 			if ( result && (matrix_1 = _matrix_inv( result )) ) {
 				_matrix_free( result );
+			/* */
 				result = _matrix_mul( matrix_1, matrix_2 );
 				_matrix_free( matrix_1 );
 				_matrix_free( matrix_2 );
