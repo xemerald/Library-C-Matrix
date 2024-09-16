@@ -13,9 +13,9 @@
 #include <stddef.h> /* Need for the size_t */
 
 /* Library version */
-#define LIBMATRIX_VERSION "1.0.0"
+#define LIBMATRIX_VERSION "1.0.1"
 /* Library release date */
-#define LIBMATRIX_RELEASE "2024.09.05"
+#define LIBMATRIX_RELEASE "2024.09.16"
 
 /**
  * @brief
@@ -39,7 +39,6 @@ typedef struct _matrix_t {
  * @name
  *
  */
-int  matrix_lib_init( void *(*)( size_t ), void (*)( void * ) );
 void matrix_print( const matrix_t *, FILE * );
 
 /**

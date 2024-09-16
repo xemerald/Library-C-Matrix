@@ -9,9 +9,14 @@ Nothing special, it can be compiled under standard C library.
 
 ## Building & Installation
 - Linux/MacOS
-	- Simply run `make` or `make static` to get the static library `libmatrix.a`
-	- Or run `make share` or `make dynamic` to get the shared library `libmatrix.so`
+	- Simply run `make` or `make default` to get the static library `libmatrix.a` with usage of CPU intrinsics
+	- Or run `make static` to get the **naive** library `libmatrix.a` without usage of CPU intrinsics
+	- Or run `make share` or `make dynamic` to get the **naive** shared library `libmatrix.so` without usage of CPU intrinsics
 	- Then you can run `sudo make install` to install this library to `/usr/local`
+
+## Unit Testing
+- Linux/MacOS
+	- Simply run `make test` to run the unit test
 
 ## Configuration
 

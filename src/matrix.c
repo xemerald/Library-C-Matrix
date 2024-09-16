@@ -63,6 +63,7 @@ static matrix_t *_matrix_mul( const matrix_t *, const matrix_t * );
 static matrix_t *_matrix_wls( const matrix_t *, const matrix_t *, const matrix_t *, const matrix_t * );
 
 static matrix_t *_matrix_scalar_add( matrix_t *, const double );
+static matrix_t *_matrix_scalar_sub( matrix_t *, const double );
 static matrix_t *_matrix_scalar_mul( matrix_t *, const double );
 
 static matrix_t *_matrix_lup_dec( const matrix_t *, matrix_t **, matrix_t **, matrix_t ** );
@@ -97,39 +98,17 @@ static void _matrix_free( matrix_t * );
  * @name
  *
  */
-static void *(* MatrixAllocFunc)( size_t ) = malloc;
-static void  (* MaxtrixFreeFunc)( void * ) = free;
-
-/**
- * @brief
- *
- * @param alloc_func
- * @param free_func
- * @return int
- */
-int matrix_lib_init( void *(*alloc_func)( size_t ), void (*free_func)( void * ) )
-{
-	matrix_t *test_matrix = NULL;
-
-/* */
-	MatrixAllocFunc = alloc_func;
-	MaxtrixFreeFunc = free_func;
-/* */
-	if ( (test_matrix = matrix_new( 1, 1 )) ) {
-		matrix_free( test_matrix );
-		return 0;
-	}
-/* Reset to default functions */
-	MatrixAllocFunc = malloc;
-	MaxtrixFreeFunc = free;
-
-	return -1;
-}
+static void *(* MatrixAllocFunc)( size_t )              = malloc;
+static void  (* MaxtrixFreeFunc)( void * )              = free;
+#ifdef __USE_AVX_INTRIN
+static void *(* MatrixAlignAllocFunc)( size_t, size_t ) = aligned_alloc;
+#endif
 
 /**
  * @brief
  *
  * @param a
+ * @param stream
  */
 void matrix_print( const matrix_t *a, FILE *stream )
 {
@@ -157,7 +136,7 @@ void matrix_print( const matrix_t *a, FILE *stream )
  */
 
 /**
- * @brief
+ * @brief Given the dimension (row & column), return (create) the row * column zero matrix.
  *
  * @param row
  * @param column
@@ -310,7 +289,7 @@ matrix_t *matrix_scalar_add( matrix_t *a, const double scalar )
  */
 matrix_t *matrix_scalar_sub( matrix_t *a, const double scalar )
 {
-	return matrix_scalar_add( a, -scalar );
+	return IS_EXIST( a ) ? _matrix_scalar_sub( a, scalar ) : NULL;
 }
 
 /**
@@ -675,7 +654,7 @@ void matrix_free( matrix_t *a )
  */
 
 /**
- * @brief
+ * @brief Given the dimension (row & column), return (create) the row * column zero matrix.
  *
  * @param row
  * @param column
@@ -693,7 +672,11 @@ static matrix_t *_matrix_new( const size_t row, const size_t column )
 		result->total = row * column;
 		elem_size     = result->total * sizeof(double);
 	/* Then use the memory allocating function to allocate the elements' space */
+	#ifdef __USE_AVX_INTRIN
+		if ( !(result->element = (double *)MatrixAlignAllocFunc( 32, elem_size )) ) {
+	#else
 		if ( !(result->element = (double *)MatrixAllocFunc( elem_size )) ) {
+	#endif
 			MaxtrixFreeFunc( result );
 			result = NULL;
 		}
@@ -707,7 +690,7 @@ static matrix_t *_matrix_new( const size_t row, const size_t column )
 }
 
 /**
- * @brief
+ * @brief Given a rank, return (create) the rank * rank identity matrix.
  *
  * @param rank
  * @return matrix_t*
@@ -779,16 +762,31 @@ static matrix_t *_matrix_inv( const matrix_t *a )
 	size_t       prow;
 	double       pivot;
 	double       swap_r[a->j];
+	double      *elem_tmp, *elem_tmp_p;
+	double      *elem_res, *elem_res_p;
 
 /* */
 	if ( (tmp = _matrix_dup( a )) && (result = _matrix_idt( a->i ))) {
+	#ifdef __USE_AVX_INTRIN
+		register __m256i mask;
+		register int     frac;
+	/* */
+		if ( (frac = a->j % STEP_AVX_PD) > 1 ) {
+			int64_t _mask[STEP_AVX_PD];
+			for ( register int i = 0; i < STEP_AVX_PD; i++ )
+				_mask[i] = (i < frac) ? -1 : 0;
+			mask = _mm256_setr_epi64x(_mask[0], _mask[1], _mask[2], _mask[3]);
+		}
+	#endif
 	/* */
 		for ( register size_t i = 0; i < a->i; i++ ) {
 		/* */
-			pivot = fabs(tmp->element[i * a->j + i]);
-			prow  = i;
-			for ( register size_t j = i + 1; j < a->i; j++ ) {
-				if ( (swap_r[0] = fabs(tmp->element[j * a->j + i])) > pivot ) {
+			elem_tmp  = tmp->element + i * a->j + i;
+			pivot     = fabs(*elem_tmp);
+			prow      = i;
+			elem_tmp += a->j;
+			for ( register size_t j = i + 1; j < a->i; j++, elem_tmp += a->j ) {
+				if ( (swap_r[0] = fabs(*elem_tmp)) > pivot ) {
 					pivot = swap_r[0];
 					prow  = j;
 				}
@@ -801,54 +799,145 @@ static matrix_t *_matrix_inv( const matrix_t *a )
 			}
 		/* */
 			if ( prow != i ) {
-				prow *= a->j;
+				elem_tmp   = tmp->element + i * a->j;
+				elem_tmp_p = tmp->element + prow * a->j;
+				elem_res   = result->element + i * a->j;
+				elem_res_p = result->element + prow * a->j;
 			/* Swap the row for tmp matrix */
-				memcpy(swap_r, tmp->element + (i * a->j), size_r);
-				memcpy(tmp->element + (i * a->j), tmp->element + prow, size_r);
-				memcpy(tmp->element + prow, swap_r, size_r);
+				memcpy(swap_r, elem_tmp, size_r);
+				memcpy(elem_tmp, elem_tmp_p, size_r);
+				memcpy(elem_tmp_p, swap_r, size_r);
 			/* Swap the row for result matrix */
-				memcpy(swap_r, result->element + (i * a->j), size_r);
-				memcpy(result->element + (i * a->j), result->element + prow, size_r);
-				memcpy(result->element + prow, swap_r, size_r);
+				memcpy(swap_r, elem_res, size_r);
+				memcpy(elem_res, elem_res_p, size_r);
+				memcpy(elem_res_p, swap_r, size_r);
 			}
 		/* */
-			pivot = tmp->element[i * a->j + i];
-			for ( register size_t j = 0, p_idx = i * a->j; j < a->j; j++, p_idx++ ) {
-			/* */
-				if ( fabs(tmp->element[p_idx]) > DBL_EPSILON )
-					tmp->element[p_idx] /= pivot;
-			/* */
-				if ( fabs(result->element[p_idx]) > DBL_EPSILON )
-					result->element[p_idx] /= pivot;
+			elem_tmp = tmp->element + i * a->j;
+			elem_res = result->element + i * a->j;
+			pivot    = *(elem_tmp + i);
+			for ( register size_t j = 0; j < a->j; j++, elem_tmp++, elem_res++ ) {
+				if ( fabs(*elem_tmp) > DBL_EPSILON )
+					*elem_tmp /= pivot;
+				if ( fabs(*elem_res) > DBL_EPSILON )
+					*elem_res /= pivot;
 			}
 		/* Eliminate the lower triangular */
 			for ( register size_t j = i + 1; j < a->i; j++ ) {
-				pivot = tmp->element[j * a->j + i];
-				if ( fabs(pivot) > DBL_EPSILON ) {
-					for ( register size_t k = 0, t_idx = j * a->j, p_idx = i * a->j; k < a->j; k++, t_idx++, p_idx++ ) {
+				if ( fabs((pivot = tmp->element[j * a->j + i])) > DBL_EPSILON ) {
+				/* */
+					elem_tmp   = tmp->element + j * a->j;
+					elem_tmp_p = tmp->element + i * a->j;
+					elem_res   = result->element + j * a->j;
+					elem_res_p = result->element + i * a->j;
+				#ifdef __USE_AVX_INTRIN
+				/* */
+					register __m256d _pivot = _mm256_set1_pd(pivot);
+				/* */
+					for ( register size_t k = 0; k + STEP_AVX_PD <= a->j; k += STEP_AVX_PD, elem_tmp += STEP_AVX_PD, elem_tmp_p += STEP_AVX_PD, elem_res += STEP_AVX_PD, elem_res_p += STEP_AVX_PD ) {
+						_mm256_storeu_pd(
+							elem_tmp,
+							_mm256_fnmadd_pd(
+								_pivot,
+								_mm256_loadu_pd(elem_tmp_p),
+								_mm256_loadu_pd(elem_tmp)
+							)
+						);
 					/* */
-						if ( fabs(tmp->element[p_idx]) > DBL_EPSILON )
-							tmp->element[t_idx] -= pivot * tmp->element[p_idx];
-					/* */
-						if ( fabs(result->element[p_idx]) > DBL_EPSILON )
-							result->element[t_idx] -= pivot * result->element[p_idx];
+						_mm256_storeu_pd(
+							elem_res,
+							_mm256_fnmadd_pd(
+								_pivot,
+								_mm256_loadu_pd(elem_res_p),
+								_mm256_loadu_pd(elem_res)
+							)
+						);
 					}
+					if ( frac > 1 ) {
+						_mm256_maskstore_pd(
+							elem_tmp,
+							mask,
+							_mm256_fnmadd_pd(
+								_pivot,
+								_mm256_maskload_pd(elem_tmp_p, mask),
+								_mm256_maskload_pd(elem_tmp, mask)
+							)
+						);
+					/* */
+						_mm256_maskstore_pd(
+							elem_res,
+							mask,
+							_mm256_fnmadd_pd(
+								_pivot,
+								_mm256_maskload_pd(elem_res_p, mask),
+								_mm256_maskload_pd(elem_res, mask)
+							)
+						);
+					}
+					else if ( frac ) {
+						if ( fabs(*elem_tmp_p) > DBL_EPSILON )
+							*elem_tmp -= pivot * (*elem_tmp_p);
+						if ( fabs(*elem_res_p) > DBL_EPSILON )
+							*elem_res -= pivot * (*elem_res_p);
+					}
+				#else
+					for ( register size_t k = 0; k < a->j; k++, elem_tmp++, elem_tmp_p++, elem_res++, elem_res_p++ ) {
+						if ( fabs(*elem_tmp_p) > DBL_EPSILON )
+							*elem_tmp -= pivot * (*elem_tmp_p);
+						if ( fabs(*elem_res_p) > DBL_EPSILON )
+							*elem_res -= pivot * (*elem_res_p);
+					}
+				#endif
 				}
 			}
 		}
 	/* Eliminate the upper triangular */
 		for ( register size_t i = a->i - 1; i > 0; i-- ) {
 			for ( register size_t j = 0; j < i; j++ ) {
-				pivot = tmp->element[j * a->j + i];
-				if ( fabs(pivot) > DBL_EPSILON ) {
-					for ( register size_t k = 0, t_idx = j * a->j, p_idx = i * a->j; k < a->j; k++, t_idx++, p_idx++ ) {
-					/* */
-						if ( fabs(tmp->element[p_idx]) > DBL_EPSILON )
-							tmp->element[t_idx] -= pivot * tmp->element[p_idx];
-					/* */
-						if ( fabs(result->element[p_idx]) > DBL_EPSILON )
-							result->element[t_idx] -= pivot * result->element[p_idx];
+				if ( fabs((pivot = tmp->element[j * a->j + i])) > DBL_EPSILON ) {
+				/* */
+					tmp->element[j * a->j + i] = 0.0;
+				#ifdef __USE_AVX_INTRIN
+				/* */
+					register __m256d _pivot = _mm256_set1_pd(pivot);
+				/* */
+					elem_res   = result->element + j * a->j;
+					elem_res_p = result->element + i * a->j;
+					for ( register size_t k = 0; k + STEP_AVX_PD <= a->j; k += STEP_AVX_PD, elem_res += STEP_AVX_PD, elem_res_p += STEP_AVX_PD ) {
+						_mm256_storeu_pd(
+							elem_res,
+							_mm256_fnmadd_pd(
+								_pivot,
+								_mm256_loadu_pd(elem_res_p),
+								_mm256_loadu_pd(elem_res)
+							)
+						);
 					}
+				/* */
+					if ( frac > 1 ) {
+						_mm256_maskstore_pd(
+							elem_res,
+							mask,
+							_mm256_fnmadd_pd(
+								_pivot,
+								_mm256_maskload_pd(elem_res_p, mask),
+								_mm256_maskload_pd(elem_res, mask)
+							)
+						);
+					}
+					else if ( frac ) {
+						if ( fabs(*elem_res_p) > DBL_EPSILON )
+							*elem_res -= pivot * (*elem_res_p);
+					}
+				#else
+				/* */
+					elem_res   = result->element + j * a->j;
+					elem_res_p = result->element + i * a->j;
+					for ( register size_t k = 0; k < a->j; k++, elem_res++, elem_res_p++ ) {
+						if ( fabs(*elem_res_p) > DBL_EPSILON )
+							*elem_res -= pivot * (*elem_res_p);
+					}
+				#endif
 				}
 			}
 		}
@@ -878,10 +967,28 @@ static matrix_t *_matrix_add( const matrix_t *a, const matrix_t *b )
 	double       *elem_res;
 	const double *elem_b = b->element;
 
+/* */
 	if ( (result = _matrix_dup( a )) ) {
 		elem_res = result->element;
-		for ( register size_t i = 0; i < result->total; i++, elem_res++, elem_b++  )
+	#ifdef __USE_AVX_INTRIN
+	/* */
+		register size_t i;
+	/* */
+		for ( i = 0; i + STEP_AVX_PD <= result->total; i += STEP_AVX_PD, elem_res += STEP_AVX_PD, elem_b += STEP_AVX_PD ) {
+			_mm256_storeu_pd(
+				elem_res,
+				_mm256_add_pd(
+					_mm256_loadu_pd(elem_res),
+					_mm256_loadu_pd(elem_b)
+				)
+			);
+		}
+		for ( ; i < result->total; i++, elem_res++, elem_b++ )
 			*elem_res += *elem_b;
+	#else
+		for ( register size_t i = 0; i < result->total; i++, elem_res++, elem_b++ )
+			*elem_res += *elem_b;
+	#endif
 	}
 
 	return result;
@@ -900,10 +1007,28 @@ static matrix_t *_matrix_sub( const matrix_t *a, const matrix_t *b )
 	double       *elem_res;
 	const double *elem_b = b->element;
 
+/* */
 	if ( (result = _matrix_dup( a )) ) {
 		elem_res = result->element;
+	#ifdef __USE_AVX_INTRIN
+	/* */
+		register size_t i;
+	/* */
+		for ( i = 0; i + STEP_AVX_PD <= result->total; i += STEP_AVX_PD, elem_res += STEP_AVX_PD, elem_b += STEP_AVX_PD ) {
+			_mm256_storeu_pd(
+				elem_res,
+				_mm256_sub_pd(
+					_mm256_loadu_pd(elem_res),
+					_mm256_loadu_pd(elem_b)
+				)
+			);
+		}
+		for ( ; i < result->total; i++, elem_res++, elem_b++ )
+			*elem_res -= *elem_b;
+	#else
 		for ( register size_t i = 0; i < result->total; i++, elem_res++, elem_b++ )
 			*elem_res -= *elem_b;
+	#endif
 	}
 
 	return result;
@@ -918,63 +1043,62 @@ static matrix_t *_matrix_sub( const matrix_t *a, const matrix_t *b )
  */
 static matrix_t *_matrix_mul( const matrix_t *a, const matrix_t *b )
 {
-/* */
-#ifdef __USE_AVX_INTRIN
-	matrix_t *result = NULL;
-	__m256d   elem_a_vec, row_vec[STEP_AVX_PD], sum_vec[STEP_AVX_PD];
-	__m256i   mask;
-
-	if ( (result = _matrix_new( a->i, b->j )) ) {
-		for ( register size_t i = 0; i < a->i; i += STEP_AVX_PD ) {
-			for ( register size_t j = 0; j < b->j; j += STEP_AVX_PD) {
-			/* Set to zero */
-				for ( register int k = 0; k < STEP_AVX_PD; k++ )
-					sum_vec[k] = _mm256_setzero_pd();
-			/* */
-				for ( register int k = 0; k < a->j; k += STEP_AVX_PD ) {
-				/* Load the matrix b elements */
-					for ( register int l = 0; l < STEP_AVX_PD; l++ ) {
-						if ( (j + STEP_AVX_PD) <= b->j ) {
-							row_vec[l] = _mm256_loadu_pd(b->element + (k + l) * b->j + j);
-						}
-						else {
-							int64_t _mask[STEP_AVX_PD];
-							for ( register int ll = 0; ll < STEP_AVX_PD; ll++ )
-								_mask[ll] = (j + ll < b->j) ? -1 : 0;
-							mask       = _mm256_setr_epi64x(_mask[0], _mask[1], _mask[2], _mask[3]);
-							row_vec[l] = _mm256_maskload_pd(b->element + (k + l) * b->j + j, mask);
-						}
-					}
-
-					for ( register int l = 0; l < STEP_AVX_PD && (i + l) < a->i; l++ ) {
-						for ( register int ll = 0; ll < STEP_AVX_PD && (k + ll) < a->j; ll++ ) {
-							elem_a_vec = _mm256_set1_pd(a->element[(i + l) * a->j + k + ll]);
-							sum_vec[l] = _mm256_fmadd_pd(row_vec[ll], elem_a_vec, sum_vec[l]);
-						}
-					}
-				}
-
-				for ( register int k = 0; k < STEP_AVX_PD && i + k < a->i; k++ ) {
-					if ( (j + STEP_AVX_PD) <= b->j )
-						_mm256_storeu_pd(result->element + (i + k) * b->j + j, sum_vec[k]);
-					else
-						_mm256_maskstore_pd(result->element + (i + k) * b->j + j, mask, sum_vec[k]);
-				}
-			}
-		}
-	}
-#else
 	matrix_t     *result = NULL;
 	double       *elem_res;
 	const double *elem_a = a->element;
 	const double *elem_b;
 
 	if ( (result = _matrix_new( a->i, b->j )) ) {
+	#ifdef __USE_AVX_INTRIN
+		register __m256i mask;
+		register int     frac;
+	/* */
+		if ( (frac = b->j % STEP_AVX_PD) > 1 ) {
+			int64_t _mask[STEP_AVX_PD];
+			for ( register int i = 0; i < STEP_AVX_PD; i++ )
+				_mask[i] = (i < frac) ? -1 : 0;
+			mask = _mm256_setr_epi64x(_mask[0], _mask[1], _mask[2], _mask[3]);
+		}
+	#endif
 		for ( register size_t i = 0; i < a->i; i++ ) {
 			for ( register size_t j = 0; j < a->j; j++, elem_a++ ) {
 				elem_b   = b->element + j * b->j;
 				elem_res = result->element + i * b->j;
 				if ( fabs(*elem_a) > DBL_EPSILON ) {
+				#ifdef __USE_AVX_INTRIN
+					register __m256d _elem_a = _mm256_set1_pd(*elem_a);
+				/* */
+					for ( register size_t k = 0; k + STEP_AVX_PD <= b->j; k += STEP_AVX_PD, elem_b += STEP_AVX_PD, elem_res += STEP_AVX_PD ) {
+						_mm256_storeu_pd(
+							elem_res,
+							_mm256_fmadd_pd(
+								_elem_a,
+								_mm256_loadu_pd(elem_b),
+								_mm256_loadu_pd(elem_res)
+							)
+						);
+					}
+				/* */
+					if ( frac > 1 ) {
+						_mm256_maskstore_pd(
+							elem_res,
+							mask,
+							_mm256_fmadd_pd(
+								_elem_a,
+								_mm256_maskload_pd(elem_b, mask),
+								_mm256_maskload_pd(elem_res, mask)
+							)
+						);
+					}
+					else if ( frac ) {
+						if ( fabs(*elem_b) > DBL_EPSILON )
+						#ifdef __USE_FMA_INTRIN
+							*elem_res = fma(*elem_a, *elem_b, *elem_res);
+						#else
+							*elem_res += (*elem_a) * (*elem_b);
+						#endif
+					}
+				#else
 					for ( register size_t k = 0; k < b->j; k++, elem_b++, elem_res++ ) {
 						if ( fabs(*elem_b) > DBL_EPSILON )
 						#ifdef __USE_FMA_INTRIN
@@ -983,11 +1107,11 @@ static matrix_t *_matrix_mul( const matrix_t *a, const matrix_t *b )
 							*elem_res += (*elem_a) * (*elem_b);
 						#endif
 					}
+				#endif
 				}
 			}
 		}
 	}
-#endif
 
 	return result;
 }
@@ -1008,16 +1132,59 @@ static matrix_t *_matrix_wls( const matrix_t *a, const matrix_t *b, const matrix
 	matrix_t *matrix_2 = NULL;
 	matrix_t *result = NULL;
 	double    tmp;
+	double   *elem_ptr;
 
 /* Find the transpose matrix of A */
 	if ( w && IS_SQUARE( w ) && w->i == a->i ) {
 	/* Here, if we got weighting matrix, just multiply with A transpose */
 		if ( !(matrix_1 = _matrix_dup( a )) )
 			return NULL;
+	#ifdef __USE_AVX_INTRIN
+		register __m256i mask;
+		register int     frac;
+	/* */
+		if ( (frac = matrix_1->j % STEP_AVX_PD) > 1 ) {
+			int64_t _mask[STEP_AVX_PD];
+			for ( register int i = 0; i < STEP_AVX_PD; i++ )
+				_mask[i] = (i < frac) ? -1 : 0;
+			mask = _mm256_setr_epi64x(_mask[0], _mask[1], _mask[2], _mask[3]);
+		}
+	#endif
+	/* */
+		elem_ptr = matrix_1->element;
 		for ( register size_t i = 0; i < matrix_1->i; i++ ) {
 			tmp = w->element[i * matrix_1->j + i];
-			for ( register size_t j = 0; j < matrix_1->j; j++ )
-				matrix_1->element[i * matrix_1->j + j] *= tmp;
+		#ifdef __USE_AVX_INTRIN
+		/* */
+			register __m256d _weight = _mm256_set1_pd(tmp);
+		/* */
+			for ( register size_t j = 0; j + STEP_AVX_PD <= matrix_1->j; j += STEP_AVX_PD, elem_ptr += STEP_AVX_PD ) {
+				_mm256_storeu_pd(
+					elem_ptr,
+					_mm256_mul_pd(
+						_weight,
+						_mm256_loadu_pd(elem_ptr)
+					)
+				);
+			}
+		/* */
+			if ( frac > 1 ) {
+				_mm256_maskstore_pd(
+					elem_ptr,
+					mask,
+					_mm256_mul_pd(
+						_weight,
+						_mm256_maskload_pd(elem_ptr, mask)
+					)
+				);
+			}
+			else if ( frac ) {
+				*elem_ptr *= tmp;
+			}
+		#else
+			for ( register size_t j = 0; j < matrix_1->j; j++, elem_ptr++ )
+				*elem_ptr *= tmp;
+		#endif
 		}
 		result = _matrix_tps( matrix_1 );
 		_matrix_free( matrix_1 );
@@ -1081,8 +1248,47 @@ static matrix_t *_matrix_scalar_add( matrix_t *a, const double scalar )
 {
 	double *elem_a = a->element;
 
+#ifdef __USE_AVX_INTRIN
+/* */
+	register __m256d _scalar = _mm256_set1_pd(scalar);
+	register size_t  i;
+/* */
+	for ( i = 0; i + STEP_AVX_PD <= a->total; i += STEP_AVX_PD, elem_a += STEP_AVX_PD )
+		_mm256_storeu_pd(elem_a, _mm256_add_pd(_mm256_loadu_pd(elem_a), _scalar));
+	for ( ; i < a->total; i++, elem_a++ )
+		*elem_a += scalar;
+#else
 	for ( register size_t i = 0; i < a->total; i++, elem_a++ )
 		*elem_a += scalar;
+#endif
+
+	return a;
+}
+
+/**
+ * @brief
+ *
+ * @param a
+ * @param scalar
+ * @return matrix_t*
+ */
+static matrix_t *_matrix_scalar_sub( matrix_t *a, const double scalar )
+{
+	double *elem_a = a->element;
+
+#ifdef __USE_AVX_INTRIN
+/* */
+	register __m256d _scalar = _mm256_set1_pd(scalar);
+	register size_t  i;
+/* */
+	for ( i = 0; i + STEP_AVX_PD <= a->total; i += STEP_AVX_PD, elem_a += STEP_AVX_PD )
+		_mm256_storeu_pd(elem_a, _mm256_sub_pd(_mm256_loadu_pd(elem_a), _scalar));
+	for ( ; i < a->total; i++, elem_a++ )
+		*elem_a -= scalar;
+#else
+	for ( register size_t i = 0; i < a->total; i++, elem_a++ )
+		*elem_a -= scalar;
+#endif
 
 	return a;
 }
@@ -1098,9 +1304,21 @@ static matrix_t *_matrix_scalar_mul( matrix_t *a, const double scalar )
 {
 	double *elem_a = a->element;
 
+#ifdef __USE_AVX_INTRIN
+/* */
+	register __m256d _scalar = _mm256_set1_pd(scalar);
+	register size_t  i;
+/* */
+	for ( i = 0; i + STEP_AVX_PD <= a->total; i += STEP_AVX_PD, elem_a += STEP_AVX_PD )
+		_mm256_storeu_pd(elem_a, _mm256_mul_pd(_mm256_loadu_pd(elem_a), _scalar));
+	for ( ; i < a->total; i++, elem_a++ )
+		if ( fabs(*elem_a) > DBL_EPSILON )
+			*elem_a *= scalar;
+#else
 	for ( register size_t i = 0; i < a->total; i++, elem_a++ )
 		if ( fabs(*elem_a) > DBL_EPSILON )
 			*elem_a *= scalar;
+#endif
 
 	return a;
 }
@@ -1124,6 +1342,8 @@ static matrix_t *_matrix_lup_dec( const matrix_t *a, matrix_t **l, matrix_t **u,
 	size_t       prow;
 	double       pivot;
 	double       swap_r[a->j];
+	double      *elem_res;
+	double      *elem_res_p;
 
 /* */
 	if ( (_p = _matrix_new( a->i + 1, 1 )) && (result = _matrix_dup( a )) ) {
@@ -1154,9 +1374,11 @@ static matrix_t *_matrix_lup_dec( const matrix_t *a, matrix_t **l, matrix_t **u,
 				_p->element[i]    = _p->element[prow];
 				_p->element[prow] = pivot;
 			/* Swap the row for result matrix */
-				memcpy(swap_r, result->element + (i * a->j), size_r);
-				memcpy(result->element + (i * a->j), result->element + (prow * a->j), size_r);
-				memcpy(result->element + (prow * a->j), swap_r, size_r);
+				elem_res   = result->element + i * a->j;
+				elem_res_p = result->element + prow * a->j;
+				memcpy(swap_r, elem_res, size_r);
+				memcpy(elem_res, elem_res_p, size_r);
+				memcpy(elem_res_p, swap_r, size_r);
 			/* */
 				_p->element[a->i] += 1.0;
 			}
@@ -1165,10 +1387,33 @@ static matrix_t *_matrix_lup_dec( const matrix_t *a, matrix_t **l, matrix_t **u,
 			/* Pivoting, store the L matrix elements */
 				pivot = (result->element[j * a->j + i] /= result->element[i * a->j + i]);
 			/* Eliminate the rest elements, store the U matrix elements */
-				if ( fabs(pivot) > DBL_EPSILON )
-					for ( register size_t k = i + 1; k < a->j; k++ )
-						if ( fabs(result->element[i * a->j + k]) > DBL_EPSILON )
-							result->element[j * a->j + k] -= pivot * result->element[i * a->j + k];
+				if ( fabs(pivot) > DBL_EPSILON ) {
+					elem_res   = result->element + j * a->j + i + 1;
+					elem_res_p = result->element + i * a->j + i + 1;
+				#ifdef __USE_AVX_INTRIN
+					register __m256d _pivot = _mm256_set1_pd(pivot);
+					register size_t  k;
+				/* */
+					for ( k = i + 1; k + STEP_AVX_PD <= a->j; k += STEP_AVX_PD, elem_res += STEP_AVX_PD, elem_res_p += STEP_AVX_PD ) {
+						_mm256_storeu_pd(
+							elem_res,
+							_mm256_fnmadd_pd(
+								_pivot,
+								_mm256_loadu_pd(elem_res_p),
+								_mm256_loadu_pd(elem_res)
+							)
+						);
+					}
+				/* */
+					for ( ; k < a->j; k++, elem_res++, elem_res_p++ )
+						if ( fabs(*elem_res_p) > DBL_EPSILON )
+							*elem_res -= pivot * (*elem_res_p);
+				#else
+					for ( register size_t k = i + 1; k < a->j; k++, elem_res++, elem_res_p++ )
+						if ( fabs(*elem_res_p) > DBL_EPSILON )
+							*elem_res -= pivot * (*elem_res_p);
+				#endif
+				}
 			}
 		}
 	/* */
@@ -1541,16 +1786,20 @@ static size_t _matrix_rk( const matrix_t *a )
 	size_t       prow;
 	double       pivot;
 	double       swap_r[a->j];
+	double      *elem_u;
+	double      *elem_u_p;
 
 /* */
 	if ( (u = matrix_dup( a )) ) {
 	/* Upper triangularize */
 		while ( r_idx < a->i && c_idx < a->j ) {
 		/* Find the pivoting row */
-			pivot = fabs(u->element[r_idx * a->j + c_idx]);
-			prow  = r_idx;
-			for ( register size_t i = r_idx + 1; i < a->i; i++ ) {
-				if ( (swap_r[0] = fabs(u->element[i * a->j + c_idx])) > pivot ) {
+			elem_u  = u->element + r_idx * a->j + c_idx;
+			pivot   = fabs(*elem_u);
+			prow    = r_idx;
+			elem_u += a->j;
+			for ( register size_t i = r_idx + 1; i < a->i; i++, elem_u += a->j ) {
+				if ( (swap_r[0] = fabs(*elem_u)) > pivot ) {
 					pivot = swap_r[0];
 					prow  = i;
 				}
@@ -1564,22 +1813,48 @@ static size_t _matrix_rk( const matrix_t *a )
 		/* Do the permutation */
 			if ( prow != r_idx ) {
 			/* */
-				prow *= a->j;
+				elem_u   = u->element + r_idx * a->j;
+				elem_u_p = u->element + prow * a->j;
 			/* Swap the row for result matrix */
-				memcpy(swap_r, u->element + (r_idx * a->j), size_r);
-				memcpy(u->element + (r_idx * a->j), u->element + prow, size_r);
-				memcpy(u->element + prow, swap_r, size_r);
+				memcpy(swap_r, elem_u, size_r);
+				memcpy(elem_u, elem_u_p, size_r);
+				memcpy(elem_u_p, swap_r, size_r);
 			}
 		/* Do the elimination */
 			for ( register size_t i = r_idx + 1; i < a->i; i++ ) {
 			/* Pivoting */
-				if ( fabs(pivot = u->element[i * a->j + c_idx] / u->element[r_idx * a->j + c_idx]) > DBL_EPSILON )
+				if ( fabs((pivot = u->element[i * a->j + c_idx])) > DBL_EPSILON ) {
+					pivot   /= u->element[r_idx * a->j + c_idx];
+					elem_u   = u->element + i * a->j + c_idx + 1;
+					elem_u_p = u->element + r_idx * a->j + c_idx + 1;
+				/* Set the lower triangular part to zero */
+					u->element[i * a->j + c_idx] = 0.0;
 				/* Eliminate the rest elements */
-					for ( register size_t k = c_idx + 1; k < a->j; k++ )
-						if ( fabs(u->element[r_idx * a->j + k]) > DBL_EPSILON )
-							u->element[i * a->j + k] -= pivot * u->element[r_idx * a->j + k];
-			/* Set the lower triangular part to zero */
-				u->element[i * a->j + c_idx] = 0.0;
+				#ifdef __USE_AVX_INTRIN
+				/* */
+					register __m256d _pivot = _mm256_set1_pd(pivot);
+					register size_t  k;
+				/* */
+					for ( k = c_idx + 1; k + STEP_AVX_PD <= a->j; k += STEP_AVX_PD, elem_u += STEP_AVX_PD, elem_u_p += STEP_AVX_PD ) {
+						_mm256_storeu_pd(
+							elem_u,
+							_mm256_fnmadd_pd(
+								_pivot,
+								_mm256_loadu_pd(elem_u_p),
+								_mm256_loadu_pd(elem_u)
+							)
+						);
+					}
+				/* */
+					for ( ; k < a->j; k++, elem_u++, elem_u_p++ )
+						if ( fabs(*elem_u_p) > DBL_EPSILON )
+							*elem_u -= pivot * (*elem_u_p);
+				#else
+					for ( register size_t k = c_idx + 1; k < a->j; k++, elem_u++, elem_u_p++ )
+						if ( fabs(*elem_u_p) > DBL_EPSILON )
+							*elem_u -= pivot * (*elem_u_p);
+				#endif
+				}
 			}
 		/* */
 			r_idx++;
@@ -1617,7 +1892,7 @@ static double _matrix_det( const matrix_t *a )
 	const size_t  step   = a->j + 1;
 
 /* */
-	if ( (lu = matrix_lup_dec( a, NULL, NULL, &p )) ) {
+	if ( (lu = _matrix_lup_dec( a, NULL, NULL, &p )) ) {
 		elem_lu = lu->element;
 	/* */
 		p->element[p->total - 1] += p->element[p->total - 1] - (int)p->element[p->total - 1];

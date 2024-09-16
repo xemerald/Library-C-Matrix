@@ -6,6 +6,8 @@
 #   CPPFLAGS : Specify c-preprocessor options to use
 CC = gcc
 CFLAGS = -Wall -O3 -g -flto
+CPPFLAGS =
+INTRIN_FLAGS =
 
 # Extract version from matrix.h, expected line should include LIBMATRIX_VERSION "#.#.#"
 MAJOR_VER = $(shell grep LIBMATRIX_VERSION ./include/matrix.h | grep -Eo '[0-9]+.[0-9]+.[0-9]+' | cut -d . -f 1)
@@ -28,6 +30,10 @@ LIB_NAME = libmatrix
 LIB_A = $(LIB_NAME).a
 
 OS := $(shell uname -s)
+AVX_FLAG := $(shell lscpu | grep -io ' avx ' | tr -d '[:space:]')
+FMA_FLAG := $(shell lscpu | grep -io ' fma ' | tr -d '[:space:]')
+
+UNIT_TEST = matrix_test
 
 # Build dynamic (.dylib) on macOS/Darwin, otherwise shared (.so)
 ifeq ($(OS), Darwin)
@@ -42,25 +48,30 @@ else
 	LIB_OPTS = -shared -Wl,--version-script=version.map -Wl,-soname,$(LIB_SO_MAJOR)
 endif
 
-all: clean static
+# Checking for the CPU flags, if there is the specific flag, turn it on.
+ifeq ($(FMA_FLAG), fma)
+	INTRIN_FLAGS+=-mfma
+	INTRIN_FLAGS+=-D__USE_FMA_INTRIN
+endif
+#
+ifeq ($(AVX_FLAG), avx)
+	INTRIN_FLAGS+=-mavx
+	INTRIN_FLAGS+=-D__USE_AVX_INTRIN
+endif
 
-all_fma: CFLAGS+=-mfma
-all_fma: CFLAGS+=-D__USE_FMA_INTRIN
-all_fma: clean static
+# Building rules
+default: CPPFLAGS+=$(INTRIN_FLAGS)
+default: clean static
 
-all_avx: CFLAGS+=-mfma
-all_avx: CFLAGS+=-mavx
-all_avx: CFLAGS+=-D__USE_AVX_INTRIN
-all_avx: CFLAGS+=-D__USE_FMA_INTRIN
-all_avx: clean static
+naive: clean static
 
 static: $(LIB_A)
 
 shared dynamic: $(LIB_SO)
 
-test: static matrix_test
-	@./matrix_test
-	@$(RM) ./matrix_test
+test: clean_test static $(UNIT_TEST)
+	@./$(UNIT_TEST)
+	@$(RM) ./$(UNIT_TEST)
 
 # Build static library
 $(LIB_A): $(LIB_OBJS)
@@ -76,13 +87,18 @@ $(LIB_SO): $(LIB_LOBJS)
 	@ln -s $(LIB_SO) $(LIB_SO_BASE)
 	@ln -s $(LIB_SO) $(LIB_SO_MAJOR)
 
-matrix_test: ./test/munit/munit.c ./test/matrix_test.c
+$(UNIT_TEST): ./test/munit/munit.c ./test/$(UNIT_TEST).c
 	@echo "Compiling $@..."
-	@$(CC) $(CFLAGS) -o $@ ./test/munit/munit.c ./test/matrix_test.c $(LIB_A)
+	@$(CC) $(CFLAGS) -o $@ ./test/munit/munit.c ./test/$(UNIT_TEST).c $(LIB_A)
 
 clean:
 	@echo "Cleaning build objects & library..."
 	@$(RM) $(LIB_OBJS) $(LIB_LOBJS) $(LIB_A) $(LIB_SO) $(LIB_SO_MAJOR) $(LIB_SO_BASE)
+	@echo "All clean."
+
+clean_test:
+	@echo "Cleaning unit testing file..."
+	@$(RM) $(UNIT_TEST)
 	@echo "All clean."
 
 install: shared

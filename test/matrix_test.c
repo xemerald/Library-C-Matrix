@@ -125,16 +125,40 @@ static const MunitSuite test_suite = {
  */
 int main( int argc, char* argv[MUNIT_ARRAY_PARAM(argc + 1)] )
 {
-	// matrix_t *a = matrix_new( 1024, 1024 );
+	matrix_t *a = matrix_new( 1024, 1024 );
 
-	// struct timespec t1;
-	// struct timespec t2;
+	struct timespec t1;
+	struct timespec t2;
 
-	// for ( int i = 0; i < a->total; i++ )
-	// 	a->element[i] = -100.0 + 200.0 * (rand() / (double)RAND_MAX);
-	// timespec_get(&t1, TIME_UTC);
-	// timespec_get(&t2, TIME_UTC);
-	// printf("Timer1: %lf\n", (double)(t2.tv_sec - t1.tv_sec) + (t2.tv_nsec - t1.tv_nsec) * 1e-9);
+/* */
+	for ( int i = 0; i < a->total; i++ )
+		a->element[i] = -100.0 + 200.0 * (rand() / (double)RAND_MAX);
+/* */
+	printf("==============================================================================\n");
+	printf("Running the Benchmark testing...\n");
+	timespec_get(&t1, TIME_UTC);
+/* */
+	matrix_t *b = matrix_inv( a );
+	matrix_t *c = matrix_mul( a, b );
+	matrix_t *d = matrix_idt( 1024 );
+	// matrix_t *at = matrix_tps( a );
+	// a = matrix_mul( a, a );
+	// matrix_scalar_mul( a, 1.0 / 0.9 );
+	// matrix_scalar_div( a, 0.9 );
+	// matrix_scalar_add( a, -0.9 );
+	// a = matrix_sub( a, a );
+	// matrix_rk( a );
+	// matrix_det( a );
+/* */
+	timespec_get(&t2, TIME_UTC);
+	printf("Executed Result: %s!\n", !matrix_cmp( c, d, 1e-12 ) ? "Correct" : "Incorrect");
+	printf("Benchmark Timer: %lf sec.\n", (double)(t2.tv_sec - t1.tv_sec) + (t2.tv_nsec - t1.tv_nsec) * 1e-9);
+/* */
+	matrix_free( a );
+	matrix_free( b );
+	matrix_free( c );
+	matrix_free( d );
+	printf("==============================================================================\n");
 
 	return munit_suite_main(&test_suite, NULL, argc, argv);
 }
