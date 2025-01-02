@@ -1153,7 +1153,7 @@ static matrix_t *_matrix_wls( const matrix_t *a, const matrix_t *b, const matrix
 	/* */
 		elem_ptr = matrix_1->element;
 		for ( register size_t i = 0; i < matrix_1->i; i++ ) {
-			tmp = w->element[i * matrix_1->j + i];
+			tmp = w->element[i * w->j + i];
 		#ifdef __USE_AVX_INTRIN
 		/* */
 			register __m256d _weight = _mm256_set1_pd(tmp);
